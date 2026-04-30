@@ -1,26 +1,18 @@
 import os
-import subprocess
-import sys
-
-# 1. СИЛОВАЯ УСТАНОВКА БИБЛИОТЕКИ (если хостинг тупит)
-try:
-    import vk_api
-except ImportError:
-    print("Библиотека vk_api не найдена. Пытаюсь установить...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "vk_api"])
-    import vk_api
-
+import vk_api
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
+from vk_api.utils import get_random_id
 
-# 2. НАСТРОЙКИ
-# Проверяем все варианты имени токена, которые ты создавала на хостинге
-TOKEN = os.getenv("BOT_TOKEN") or os.getenv("API_TOKEN") or os.getenv("BOT_API_TOKEN")
+# Настройки (из твоих скриншотов)
+TOKEN = os.getenv("BOT_TOKEN")
 GROUP_ID = '207903951'
 CHAT_PEER_ID = 2000000491
 
 def start_bot():
+    print("=== ПОПЫТКА ЗАПУСКА БОТА ===", flush=True)
+    
     if not TOKEN:
-        print("❌ ОШИБКА: Токен не найден в переменных окружения! Проверь настройки на Bothost.")
+        print("❌ ОШИБКА: Переменная BOT_TOKEN пуста! Проверь настройки хостинга.", flush=True)
         return
 
     try:
@@ -28,33 +20,36 @@ def start_bot():
         vk = vk_session.get_api()
         longpoll = VkBotLongPoll(vk_session, GROUP_ID)
         
-        print(f"✅ БОТ ЗАПУЩЕН!")
-        print(f"Слушаю группу: vk.com/club{GROUP_ID}")
-        print(f"Цель: чат {CHAT_PEER_ID}")
+        print("✅ БОТ ПОДКЛЮЧИЛСЯ К VK!", flush=True)
+        print(f"Слушаю стену группы {GROUP_ID}...", flush=True)
 
         for event in longpoll.listen():
+            # Это покажет ЛЮБОЕ действие в логах
+            print(f"Получено событие: {event.type}", flush=True)
+
             if event.type == VkBotEventType.WALL_POST_NEW:
-                post = event.obj
-                # Важно: для некоторых версий API структура event.obj может отличаться
-                # используем максимально надежный способ получения ID
+                # Универсальное получение данных для API 5.199
+                post = event.obj.get('wallpost') or event.obj
                 post_id = post.get('id')
                 owner_id = post.get('owner_id')
-                
-                attachment = f'wall{owner_id}_{post_id}'
-                
-                try:
-                    vk.messages.send(
-                        peer_id=CHAT_PEER_ID,
-                        message="📢 Внимание! Новый пост в группе!",
-                        attachment=attachment,
-                        random_id=0
-                    )
-                    print(f"🚀 Репост {attachment} отправлен!")
-                except Exception as send_error:
-                    print(f"❌ Ошибка отправки: {send_error}")
+
+                if post_id:
+                    attachment = f"wall{owner_id}_{post_id}"
+                    print(f"🔎 Вижу новый пост! Пытаюсь отправить в чат {CHAT_PEER_ID}...", flush=True)
                     
+                    try:
+                        vk.messages.send(
+                            peer_id=CHAT_PEER_ID,
+                            message="📢 Внимание! Новый пост в группе!",
+                            attachment=attachment,
+                            random_id=get_random_id()
+                        )
+                        print(f"🚀 Пост {attachment} успешно отправлен в чат!", flush=True)
+                    except Exception as send_err:
+                        print(f"❌ Ошибка при отправке: {send_err}", flush=True)
+
     except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
+        print(f"❌ КРИТИЧЕСКИЙ СБОЙ: {e}", flush=True)
 
 if __name__ == "__main__":
     start_bot()
