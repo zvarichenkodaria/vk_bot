@@ -67,7 +67,7 @@ def start():
                 now = datetime.now()
                 
                 # ТАЙМЕР
-                if now.hour == 6 and now.minute == 55 and last_day != now.day:
+                if now.hour == 6 and now.minute == 50 and last_day != now.day:
                     make_digest(session)
                     last_day = now.day
 
