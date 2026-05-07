@@ -1,115 +1,106 @@
-import os
-import vk_api
-import time
-import re
-import sys
-from datetime import datetime, timedelta
-from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
-from vk_api.utils import get_random_id
+import os, vk_api, time, re, sys
+from datetime import datetime
 
 # --- НАСТРОЙКИ ---
 TOKEN = os.getenv("BOT_TOKEN")
-GROUP_ID = '207903951'
-CHAT_PEER_ID = 2000000001
-CHAT_PEER_ID_DIGEST = 2000000002
-NEWS_TAG = "#новости_RevolutionDance"
+GROUP_ID = '209129877'
+CHAT_1 = 2000000004
+CHAT_2 = 2000000004
+TAG = "#новости_RevolutionDance"
+DB_FILE = "post_ids.txt"
 
 def log(msg):
-    # Принудительный вывод, который хостинг точно увидит
-    timestamp = datetime.now().strftime('%H:%M:%S')
-    print(f"[{timestamp}] {msg}", flush=True)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-def get_digest_text(vk):
-    log("🔎 Собираю новости...")
+def send(session, cid, text, att=None):
     try:
-        response = vk.wall.get(owner_id=f"-{GROUP_ID}", count=40)
-        posts = response.get('items', [])
-        
-        now = datetime.now()
-        week_ago = now - timedelta(days=7)
-        digest_items = []
-        emojis = ["🔹", "🔸", "✅", "📍", "✨", "📢", "🔥"]
-        
-        for post in posts:
-            p_text = post.get('text', '')
-            p_date = datetime.fromtimestamp(post.get('date', 0))
-            
-            if p_date > week_ago and NEWS_TAG in p_text:
-                clean_text = p_text.replace(NEWS_TAG, "").strip()
-                clean_text = re.sub(r'^\s+', '', clean_text)
-                
-                sentences = re.split(r'(?<=[.!?])\s+', clean_text)
-                final_text = " ".join(sentences[:2]).strip()
-                
-                if final_text:
-                    post_ref = f"wall{post['owner_id']}_{post['id']}"
-                    emoji = emojis[len(digest_items) % len(emojis)]
-                    digest_items.append(f"{emoji} {final_text} [ {post_ref} | Подробнее ]")
-
-        if not digest_items:
-            log("⚠ Новостей с тегом не найдено.")
-            return None
-        
-        header = "ГЛАВНЫЕ НОВОСТИ НЕДЕЛИ:\n\n"
-        footer = f"\n\nПодписаться на [https://vk.com/club{GROUP_ID}|СМИ Revolution Dance]"
-        return header + "\n\n".join(digest_items) + footer
+        session.method('messages.send', {
+            'peer_id': int(cid), 
+            'message': text, 
+            'attachment': att, 
+            'random_id': 0
+        })
     except Exception as e:
-        log(f"❌ Ошибка в get_digest: {e}")
-        return None
+        log(f"Ошибка отправки: {e}")
 
-def start_bot():
-    log("--- ПРОВЕРКА ЗАПУСКА ---")
-    if not TOKEN:
-        log("❌ ОШИБКА: Нет токена в переменных!")
+def make_digest(session):
+    log("📡 Формирую свежий дайджест...")
+    if not os.path.exists(DB_FILE):
+        log("ℹ️ Файл с ID пуст.")
+        return
+
+    with open(DB_FILE, "r") as f:
+        post_ids = [line.strip() for line in f.readlines() if line.strip()]
+
+    if not post_ids:
+        log("ℹ️ Нет постов для дайджеста.")
         return
 
     try:
-        vk_session = vk_api.VkApi(token=TOKEN)
-        vk = vk_session.get_api()
-        longpoll = VkBotLongPoll(vk_session, GROUP_ID)
-        log("✅ Подключение к VK успешно.")
+        # Получаем актуальные тексты постов
+        posts = session.method('wall.getById', {'posts': ",".join(post_ids)})
+        
+        items = []
+        for p in posts:
+            text = p.get('text', '')
+            if TAG in text:
+                clean = text.replace(TAG, "").strip()
+                # Берем первые два предложения
+                sentences = re.split(r'(?<=[.!?])\s+', clean)
+                short = " ".join(sentences[:2])
+                if short:
+                    items.append(f"🔹 {short} [ wall{p['owner_id']}_{p['id']} | Подробнее ]")
+
+        if items:
+            msg = "ГЛАВНЫЕ НОВОСТИ НЕДЕЛИ:\n\n" + "\n\n".join(items)
+            send(session, CHAT_2, msg)
+            log("✅ Дайджест отправлен!")
+            open(DB_FILE, "w").close() # Очистка после успеха
+        else:
+            log("ℹ️ Подходящих постов не найдено.")
     except Exception as e:
-        log(f"❌ ОШИБКА ПОДКЛЮЧЕНИЯ: {e}")
-        return
+        log(f"❌ Ошибка при сборке: {e}")
 
-    last_sent_day = -1
-
+def start():
+    log("🚀 БОТ ЗАПУЩЕН (РЕЖИМ ID)")
+    last_day = -1
+    
     while True:
         try:
-            now = datetime.now()
-            
-            # --- ВРЕМЯ МЕНЯТЬ ТУТ ---
-            # Ставь время (Час, Минута)
-            t_hour = 12
-            t_min = 28
+            session = vk_api.VkApi(token=TOKEN)
+            from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
+            lp = VkBotLongPoll(session, GROUP_ID)
+            log("✅ Подключение к VK успешно.")
 
-            if now.hour == t_hour and now.minute == t_min and last_sent_day != now.day:
-                log(f"⏰ Пора слать дайджест ({t_hour}:{t_min})")
-                digest = get_digest_text(vk)
-                if digest:
-                    vk.messages.send(peer_id=CHAT_PEER_ID_DIGEST, message=digest, random_id=get_random_id())
-                    log("🚀 Дайджест отправлен.")
-                last_sent_day = now.day
+            while True:
+                now = datetime.now()
+                
+                # ТАЙМЕР (6:05 по серверному времени)
+                if now.hour == 6 and now.minute == 15 and last_day != now.day:
+                    make_digest(session)
+                    last_day = now.day
 
-            # --- ПРОВЕРКА НОВЫХ ПОСТОВ ---
-            events = longpoll.check()
-            for event in events:
-                if event.type == VkBotEventType.WALL_POST_NEW:
-                    post = event.obj.get('wallpost') or event.obj
-                    att = f"wall{post.get('owner_id')}_{post.get('id')}"
-                    vk.messages.send(
-                        peer_id=CHAT_PEER_ID, 
-                        message="📢 Новый пост в группе!", 
-                        attachment=att, 
-                        random_id=get_random_id()
-                    )
-                    log(f"✅ Репост выполнен: {att}")
+                # Ожидание событий (LongPoll)
+                events = lp.check()
+                for event in events:
+                    if event.type == VkBotEventType.WALL_POST_NEW:
+                        p = event.obj.get('wallpost') or event.obj
+                        post_id = f"{p['owner_id']}_{p['id']}"
+                        
+                        # 1. Мгновенный репост
+                        send(session, CHAT_1, "📢 Новый пост в группе!", f"wall{post_id}")
+                        log(f"✅ Репост выполнен: {post_id}")
+                        
+                        # 2. Сохранение для дайджеста, если есть тег
+                        if TAG in p.get('text', ''):
+                            with open(DB_FILE, "a") as f:
+                                f.write(f"{post_id}\n")
+                            log(f"💾 ID {post_id} сохранен для дайджеста.")
 
-            time.sleep(2) # Защита от перегрузки CPU
-
+                time.sleep(3)
         except Exception as e:
-            log(f"⚠ Ошибка в цикле: {e}")
-            time.sleep(5)
+            log(f"🔄 Рестарт: {e}")
+            time.sleep(10)
 
 if __name__ == "__main__":
-    start_bot()
+    start()
