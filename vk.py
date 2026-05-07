@@ -3,11 +3,11 @@ from datetime import datetime
 
 # --- НАСТРОЙКИ ---
 TOKEN = os.getenv("BOT_TOKEN")
-GROUP_ID = '209129877'
-CHAT_1 = 2000000004
-CHAT_2 = 2000000004
+GROUP_ID = '207903951'
+CHAT_1 = 2000000001
+CHAT_2 = 2000000002
 TAG = "#новости_RevolutionDance"
-DB_FILE = "post_ids.txt"
+DB_FILE = "digest_content.txt"
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -24,45 +24,36 @@ def send(session, cid, text, att=None):
         log(f"Ошибка отправки: {e}")
 
 def make_digest(session):
-    log("📡 Формирую свежий дайджест...")
-    if not os.path.exists(DB_FILE):
-        log("ℹ️ Файл с ID пуст.")
-        return
-
-    with open(DB_FILE, "r") as f:
-        post_ids = [line.strip() for line in f.readlines() if line.strip()]
-
-    if not post_ids:
-        log("ℹ️ Нет постов для дайджеста.")
+    log("📡 Сборка финального дайджеста...")
+    if not os.path.exists(DB_FILE) or os.path.getsize(DB_FILE) == 0:
+        log("ℹ️ Нечего отправлять.")
         return
 
     try:
-        # Получаем актуальные тексты постов
-        posts = session.method('wall.getById', {'posts': ",".join(post_ids)})
-        
-        items = []
-        for p in posts:
-            text = p.get('text', '')
-            if TAG in text:
-                clean = text.replace(TAG, "").strip()
-                # Берем первые два предложения
-                sentences = re.split(r'(?<=[.!?])\s+', clean)
-                short = " ".join(sentences[:2])
-                if short:
-                    items.append(f"🔹 {short} [ wall{p['owner_id']}_{p['id']} | Подробнее ]")
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            content = f.read().strip()
 
-        if items:
-            msg = "ГЛАВНЫЕ НОВОСТИ НЕДЕЛИ:\n\n" + "\n\n".join(items)
-            send(session, CHAT_2, msg)
-            log("✅ Дайджест отправлен!")
-            open(DB_FILE, "w").close() # Очистка после успеха
-        else:
-            log("ℹ️ Подходящих постов не найдено.")
+        if content:
+            # 1. Делаем заголовок ЖИРНЫМ (через ссылку на группу)
+            header = f"[public{GROUP_ID}|ГЛАВНЫЕ НОВОСТИ НЕДЕЛИ:]"
+            
+            # 2. Собираем всё вместе
+            full_msg = f"{header}\n\n{content}\n\n"
+            
+            # 3. Красивая подпись со ссылкой
+            full_msg += "[https://vk.com/revolution_sensation|Подписаться на СМИ Revolution Dance]"
+            
+            send(session, CHAT_2, full_msg)
+            log("✅ Идеальный дайджест отправлен!")
+            
+            # Очистка
+            open(DB_FILE, "w", encoding="utf-8").close()
+            
     except Exception as e:
-        log(f"❌ Ошибка при сборке: {e}")
+        log(f"❌ Ошибка: {e}")
 
 def start():
-    log("🚀 БОТ ЗАПУЩЕН (РЕЖИМ ID)")
+    log("🚀 БОТ ЗАПУЩЕН (FINAL BEAUTY VERSION)")
     last_day = -1
     
     while True:
@@ -70,32 +61,38 @@ def start():
             session = vk_api.VkApi(token=TOKEN)
             from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
             lp = VkBotLongPoll(session, GROUP_ID)
-            log("✅ Подключение к VK успешно.")
+            log("✅ Подключение успешно.")
 
             while True:
                 now = datetime.now()
                 
-                # ТАЙМЕР (6:05 по серверному времени)
-                if now.hour == 6 and now.minute == 15 and last_day != now.day:
+                # ТАЙМЕР
+                if now.hour == 6 and now.minute == 55 and last_day != now.day:
                     make_digest(session)
                     last_day = now.day
 
-                # Ожидание событий (LongPoll)
                 events = lp.check()
                 for event in events:
                     if event.type == VkBotEventType.WALL_POST_NEW:
                         p = event.obj.get('wallpost') or event.obj
+                        p_text = p.get('text', '')
                         post_id = f"{p['owner_id']}_{p['id']}"
                         
-                        # 1. Мгновенный репост
                         send(session, CHAT_1, "📢 Новый пост в группе!", f"wall{post_id}")
-                        log(f"✅ Репост выполнен: {post_id}")
                         
-                        # 2. Сохранение для дайджеста, если есть тег
-                        if TAG in p.get('text', ''):
-                            with open(DB_FILE, "a") as f:
-                                f.write(f"{post_id}\n")
-                            log(f"💾 ID {post_id} сохранен для дайджеста.")
+                        if TAG in p_text:
+                            clean = p_text.replace(TAG, "").strip()
+                            sentences = re.split(r'(?<=[.!?])\s+', clean)
+                            short = " ".join(sentences[:2]).strip()
+                            if not short: short = "Новый пост"
+                            
+                            full_url = f"https://vk.com/wall{post_id}"
+                            # Формируем строку новости
+                            entry = f"💢 {short} [{full_url}|Подробнее]\n\n"
+                            
+                            with open(DB_FILE, "a", encoding="utf-8") as f:
+                                f.write(entry)
+                            log(f"💾 Сохранено: {post_id}")
 
                 time.sleep(3)
         except Exception as e:
