@@ -35,7 +35,7 @@ def make_digest(session):
 
         if content:
             # 1. Делаем заголовок ЖИРНЫМ (через ссылку на группу)
-            header = f"[public{GROUP_ID}|ГЛАВНЫЕ НОВОСТИ НЕДЕЛИ:]"
+            header = "ГЛАВНЫЕ НОВОСТИ НЕДЕЛИ:"
             
             # 2. Собираем всё вместе
             full_msg = f"{header}\n\n{content}\n\n"
