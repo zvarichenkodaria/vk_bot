@@ -5,7 +5,7 @@ from datetime import datetime
 TOKEN = os.getenv("BOT_TOKEN")
 GROUP_ID = '207903951'
 CHAT_1 = 2000000001
-CHAT_2 = 2000000002
+CHAT_2 = 2000000001
 TAG = "#новости_RevolutionDance"
 DB_FILE = "digest_content.txt"
 
@@ -67,7 +67,7 @@ def start():
                 now = datetime.now()
                 
                 # ТАЙМЕР
-                if now.hour == 6 and now.minute == 50 and last_day != now.day:
+                if now.weekday() == 0 and now.hour == 4 and now.minute == 0 and last_day != now.day:
                     make_digest(session)
                     last_day = now.day
 
