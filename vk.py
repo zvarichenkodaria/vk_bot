@@ -1,4 +1,10 @@
-import os, vk_api, time, re, sys, json, threading
+import os
+import vk_api
+import time
+import re
+import sys
+import json
+import threading
 from datetime import datetime
 
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
@@ -18,12 +24,13 @@ CHAT_LOG_MONTHLY = 2000000002  # Чат для логов в конце меся
 TAG = "#новости_RevolutionDance"
 DB_FILE = "digest_content.txt"
 STATS_FILE = "stats_db.json"  # Файл для хранения баллов
+PLACE_FILE = "place_db.json"  # Файл для отметок /place
 
 def log(msg):
     timestamp = datetime.now().strftime('%H:%M:%S')
     print(f"[{timestamp}] {msg}", flush=True)
 
-# Инициализация базы данных статистики
+# --- ИНИЦИАЛИЗАЦИЯ И РАБОТА С БАЗАМИ ДАННЫХ ---
 def init_stats():
     if not os.path.exists(STATS_FILE) or os.path.getsize(STATS_FILE) == 0:
         with open(STATS_FILE, "w", encoding="utf-8") as f:
@@ -37,6 +44,20 @@ def load_stats():
 def save_stats(stats):
     with open(STATS_FILE, "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=4)
+
+def init_place_db():
+    if not os.path.exists(PLACE_FILE) or os.path.getsize(PLACE_FILE) == 0:
+        with open(PLACE_FILE, "w", encoding="utf-8") as f:
+            json.dump({}, f, ensure_ascii=False, indent=4)
+
+def load_place_db():
+    init_place_db()
+    with open(PLACE_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_place_db(data):
+    with open(PLACE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
 def update_score(role, user_id, delta):
     stats = load_stats()
@@ -68,14 +89,13 @@ def get_user_name(vk, user_id):
         log(f"Ошибка получения имени для {user_id}: {e}")
     return f"id{user_id}"
 
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def build_list_text(vk, role_key, title_role):
     stats = load_stats()
     role_data = stats.get(role_key, {})
     
-    # Сортируем по убыванию баллов
     sorted_users = sorted(role_data.items(), key=lambda x: x[1], reverse=True)
     
-    # Получаем текущий месяц и год на русском
     months = ["январь", "февраль", "март", "апрель", "май", "июнь", 
               "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
     now = datetime.now()
@@ -89,8 +109,39 @@ def build_list_text(vk, role_key, title_role):
         
     for idx, (uid, score) in enumerate(sorted_users, 1):
         name = get_user_name(vk, int(uid))
-        # Ссылки через [id...|...] кликабельны, но НЕ присылают push-уведомлений пользователям
         text += f"{idx}. [id{uid}|{name}] - {score}\n"
+        
+    return text.strip()
+
+def build_individual_score_text(vk, role_key, title_role, user_id):
+    stats = load_stats()
+    role_data = stats.get(role_key, {})
+    uid_str = str(user_id)
+    
+    months = ["январь", "февраль", "март", "апрель", "май", "июнь", 
+              "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
+    now = datetime.now()
+    month_name = months[now.month - 1]
+    
+    name = get_user_name(vk, user_id)
+    score = role_data.get(uid_str, 0)
+    
+    return f"⭐ Статистика {title_role} ({month_name} {now.year}):\n[id{user_id}|{name}] — {score} баллов."
+
+def build_place_list_text(vk):
+    data = load_place_db()
+    if not data:
+        return "📋 Списки отметившихся пока пусты."
+        
+    months = ["январь", "февраль", "март", "апрель", "май", "июнь", 
+              "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
+    now = datetime.now()
+    month_name = months[now.month - 1]
+    
+    text = f"📋 Список отметившихся информаторов ({month_name} {now.year}):\n"
+    for idx, (uid, info) in enumerate(data.items(), 1):
+        custom_id = info.get('custom_id', 'не указан')
+        text += f"{idx}. [id{uid}|{info['name']}] ({custom_id}) — {info['fraction'].upper()} ({info['time']})\n"
         
     return text.strip()
 
@@ -147,6 +198,71 @@ def get_report_keyboard(user_id, source_peer_id):
         ]]
     }
 
+# --- ЛОГИКА ОЧИСТКИ И ИСКЛЮЧЕНИЯ (KICK) ---
+def kick_unregistered_users(vk):
+    try:
+        log("🚨 Начинается процедура зачистки не отписавшихся информаторов...")
+        
+        journalists_ids = set()
+        try:
+            members = vk.messages.getConversationMembers(peer_id=CHAT_ADMIN_REPORTS)
+            for profile in members.get('profiles', []):
+                journalists_ids.add(profile['id'])
+        except Exception as e:
+            log(f"Не удалось получить участников чата журналистов для исключения из ПК: {e}")
+            
+        registered_data = load_place_db()
+        registered_ids = {int(uid) for uid in registered_data.keys()}
+        
+        try:
+            bot_info = vk.groups.getById()
+            bot_id = -bot_info[0]['id'] 
+            group_raw_id = bot_info[0]['id']
+        except:
+            bot_id = 0
+            group_raw_id = 0
+
+        white_list = journalists_ids.union(registered_ids)
+        if bot_id: white_list.add(bot_id)
+        if group_raw_id: white_list.add(group_raw_id)
+        
+        inf_chat_members = vk.messages.getConversationMembers(peer_id=CHAT_INFORMATORS)
+        
+        kicked_count = 0
+        kicked_names = []
+        
+        for item in inf_chat_members.get('items', []):
+            member_id = item.get('member_id')
+            
+            if member_id > 0 and member_id not in white_list:
+                if item.get('is_admin'):
+                    continue
+                    
+                user_name = get_user_name(vk, member_id)
+                log(f"⚠️ Исключаю: {user_name} (id{member_id}) — нет отметки в /place")
+                
+                try:
+                    vk.messages.removeChatUser(chat_id=CHAT_INFORMATORS - 2000000000, user_id=member_id)
+                    kicked_count += 1
+                    kicked_names.append(f"[id{member_id}|{user_name}]")
+                    time.sleep(2.0)  
+                except Exception as ex:
+                    log(f"Не удалось исключить id{member_id}: {ex}")
+                    
+        report_msg = f"🧹 Автоматическая зачистка завершена!\nИсключено пользователей: {kicked_count}\n"
+        if kicked_names:
+            report_msg += "Список кикнутых:\n" + "\n".join(f"- {name}" for name in kicked_names)
+        else:
+            report_msg += "Все информаторы вовремя прошли проверку."
+            
+        send(vk, CHAT_INFORMATORS, f"⚙️ Ночная проверка завершена. Те, кто не оставил отметку, были исключены из беседы.")
+        send(vk, CHAT_LOG_MONTHLY, f"📋 ОТЧЕТ О СЕЗОННОЙ ЧИСТКЕ ЧАТА ИНФОРМАТОРОВ:\n\n{report_msg}")
+        log(f"✅ Зачистка окончена. Кикнуто: {kicked_count}")
+        
+    except Exception as e:
+        log(f"Критическая ошибка в блоке зачистки: {e}")
+
+# --- ОСТАЛЬНЫЕ АВТОМАТИЧЕСКИЕ ПРОЦЕДУРЫ ---
 def make_digest(vk, target_chat, clear_file=True):
     if not os.path.exists(DB_FILE) or os.path.getsize(DB_FILE) == 0:
         if not clear_file: 
@@ -168,7 +284,6 @@ def make_digest(vk, target_chat, clear_file=True):
     except Exception as e:
         log(f"Ошибка дайджеста: {e}")
 
-# Процедура принудительного сброса ОДНОЙ конкретной роли
 def force_clear_single_role(vk, role):
     try:
         months = ["ЯНВАРЬ", "ФЕВРАЛЬ", "МАРТ", "АПРЕЛЬ", "МАЙ", "ИЮНЬ", 
@@ -178,40 +293,29 @@ def force_clear_single_role(vk, role):
 
         if role == "informers":
             list_text = build_list_text(vk, "informers", "информаторов")
-            # 1. В беседу информаторов
             send(vk, CHAT_INFORMATORS, f"Внимание! Сделан подсчет новостей:\n{list_text}")
-            # 2. В лог-чат
             send(vk, CHAT_LOG_MONTHLY, f"📢 Внеплановые баллы информаторов за {month_name}\n{list_text}")
-            # Очищаем только их
             clear_role_stats("informers")
             
         elif role == "journalists":
             list_text = build_list_text(vk, "journalists", "журналистов")
-            # 1. В беседу журналистов
             send(vk, CHAT_ADMIN_REPORTS, f"Внимание! Сделан подсчет новостей:\n{list_text}")
-            # 2. В лог-чат
             send(vk, CHAT_LOG_MONTHLY, f"📢 Внеплановые баллы журналистов за {month_name}\n{list_text}")
-            # Очищаем только их
             clear_role_stats("journalists")
 
         log(f"✅ Досрочный раздельный сброс для [{role}] успешно выполнен.")
     except Exception as e:
         log(f"Ошибка при досрочном сбросе роли {role}: {e}")
 
-# Плановая процедура полного отчета (1-е число месяца)
 def make_monthly_report(vk):
     try:
         log("📊 Начало формирования планового ежемесячного отчета...")
         list_inf = build_list_text(vk, "informers", "информаторов")
         list_jur = build_list_text(vk, "journalists", "журналистов")
         
-        # 1. Отправка информаторам
         send(vk, CHAT_INFORMATORS, f"Внимание! Сделан подсчет новостей:\n{list_inf}")
-        
-        # 2. Отправка журналистам
         send(vk, CHAT_ADMIN_REPORTS, f"Внимание! Сделан подсчет новостей:\n{list_jur}")
         
-        # 3. Отправка в лог-чат
         months = ["ЯНВАРЬ", "ФЕВРАЛЬ", "МАРТ", "АПРЕЛЬ", "МАЙ", "ИЮНЬ", 
                   "ИЮЛЬ", "АВГУСТ", "СЕНТЯБРЬ", "ОКТЯБРЬ", "НОЯБРЬ", "ДЕКАБРЬ"]
         now = datetime.now()
@@ -220,67 +324,94 @@ def make_monthly_report(vk):
         msg_log = f"📢 Баллы информаторов за {month_name}\n{list_inf}\n\n📢 Баллы журналистов за {month_name}\n{list_jur}"
         send(vk, CHAT_LOG_MONTHLY, msg_log)
         
-        # Полное обнуление всей базы
         clear_role_stats("informers")
         clear_role_stats("journalists")
         log("✅ Плановый ежемесячный отчет успешно разослан, статистика обнулена.")
     except Exception as e:
         log(f"Ошибка при создании планового отчета: {e}")
 
-# Фоновая функция для проверки времени
+# --- ФОНОВЫЙ НАБЛЮДАТЕЛЬ ВРЕМЕНИ (WATCHDOG) ---
 def watchdog(vk):
     last_digest_day = -1
     last_monthly_report_month = -1
+    last_check_day = -1
+    last_kick_day = -1
     log("⏰ Воркер проверки времени запущен")
+    
     while True:
         try:
             now = datetime.now()
-            
             TARGET_HOUR = 4
             TARGET_MINUTE = 0
 
             # --- 1. Еженедельный дайджест (Понедельник) ---
             if (now.weekday() == 0 and 
                 now.hour == TARGET_HOUR and 
-                now.minute >= TARGET_MINUTE and 
+                now.minute == TARGET_MINUTE and 
                 last_digest_day != now.day):
                 
+                last_digest_day = now.day
                 log(f"📅 Время пришло ({now.hour}:{now.minute}). Отправляю еженедельный дайджест...")
                 make_digest(vk, CHAT_WEEKLY_DIGEST, clear_file=True)
-                last_digest_day = now.day
             
-            # --- 2. Ежемесячный отчет (1 число месяца) ---
+            # --- 2. Ежемесячный отчет по баллам (1 число месяца) ---
             if (now.day == 1 and 
                 now.hour == TARGET_HOUR and 
-                now.minute >= TARGET_MINUTE and 
+                now.minute == TARGET_MINUTE and 
                 last_monthly_report_month != now.month):
                 
+                last_monthly_report_month = now.month
                 log(f"📅 Первое число месяца! Время ({now.hour}:{now.minute}). Запускаю расчет баллов...")
                 make_monthly_report(vk)
-                last_monthly_report_month = now.month
+
+            # --- 3. Сезонная рассылка проверки информаторов ---
+            if (now.day == 1 and now.month in [1, 3, 6, 9] and
+                now.hour == TARGET_HOUR and now.minute == TARGET_MINUTE and
+                last_check_day != now.day):
+                
+                last_check_day = now.day
+                log("📢 Начало нового сезона! Сбрасываю базу /place и отправляю уведомление...")
+                save_place_db({})
+                
+                alert_text = "🔔 @all Проверка информаторов! Просьба отписаться каждого о своём местонахождении по шаблону:\n\n/place Айди Фракция\nДалее прикрепите скриншот страницы «Мой кот/Моя кошка»\n\nФракцию можно писать как кратко, так и полностью!\nОтписываться можно как в ЛС группы, так и в данную беседу!\nВ случае отсутствия отписи вы будете исключены ночью 3 числа месяца."
+                
+                send(vk, CHAT_INFORMATORS, alert_text)
+                send(vk, CHAT_LOG_MONTHLY, f"📢 Сезонная проверка запущена в чате информаторов!\nТекст: {alert_text}")
+
+            # --- 4. Сезонный автоматический кик не отписавшихся ---
+            if (now.day == 3 and now.month in [1, 3, 6, 9] and
+                now.hour == TARGET_HOUR and now.minute == TARGET_MINUTE and
+                last_kick_day != now.day):
+                
+                last_kick_day = now.day
+                kick_unregistered_users(vk)
 
             time.sleep(30) 
         except Exception as e:
             log(f"Ошибка в watchdog: {e}")
             time.sleep(10)
 
+# --- ГЛАВНЫЙ СТАРТ И ОБРАБОТЧИК СОБЫТИЙ ---
 def start():
     log("🚀 ПОПЫТКА ЗАПУСКА...")
     init_stats()
+    init_place_db()
     
     if not TOKEN:
         log("❌ ОШИБКА: Токен не найден!")
         return
 
+    vk_session = vk_api.VkApi(token=TOKEN)
+    vk = vk_session.get_api()
+
+    # Поток watchdog запускается строго ОДИН раз до входа в бесконечный цикл LongPoll
+    timer_thread = threading.Thread(target=watchdog, args=(vk,), daemon=True)
+    timer_thread.start()
+
     while True:
         try:
-            vk_session = vk_api.VkApi(token=TOKEN)
-            vk = vk_session.get_api()
             lp = VkBotLongPoll(vk_session, GROUP_ID)
-            log("✅ БОТ УСПЕШНО ПОДКЛЮЧЕН")
-
-            timer_thread = threading.Thread(target=watchdog, args=(vk,), daemon=True)
-            timer_thread.start()
+            log("✅ БОТ УСПЕШНО ПОДКЛЮЧЕН К LONGPOLL")
 
             for event in lp.listen():
                 if event.type == VkBotEventType.MESSAGE_NEW:
@@ -296,6 +427,77 @@ def start():
 
                     elif text == '/test':
                         make_digest(vk, CHAT_ADMIN_REPORTS, clear_file=False)
+
+                    # --- Команда Справки для информаторов ---
+                    elif text == '/help':
+                        help_msg = (
+                            "ℹ️ Справка по командам для информаторов:\n\n"
+                            "ПРЕДЛОЖКА:\n"
+                            "/report [текст и картинки] - предложить новость.\n\n"
+                            "СТАТИСТИКА:\n"
+                            "/list - посмотреть топ баллов информаторов.\n"
+                            "/indlist - узнать свои личные баллы.\n\n"
+                            "ПЕРЕПИСЬ О ПРЕБЫВАНИИ:\n"
+                            "/place [Айди] [Фракция] [скриншот] - отметиться.\n"
+                        )
+                        send(vk, peer_id, help_msg)
+
+                    # --- Полная админская справка ---
+                    elif text == '/helpj':
+                        help_msg = (
+                            "⚙️ ПОЛНЫЙ СПИСОК КОМАНД БОТА (Admin/Journalists):\n\n"
+                            "ПРОСМОТР СПИСКОВ:\n"
+                            "/list - баллы информаторов за месяц.\n"
+                            "/listj - баллы журналистов за месяц.\n"
+                            "/indlist - личные баллы информаторов.\n"
+                            "/indlistj личные баллы журналистов.\n\n"
+                            "РУЧНОЕ УПРАВЛЕНИЕ БАЛЛАМИ:\n"
+                            "/plus1 - добавить 1 балл себе.\n"
+                            "/plus1 [id/упоминание] - добавить 1 балл пользователю.\n"
+                            "/minus1 - вычесть 1 балл у себя.\n"
+                            "/minus1 [id/упоминание] - вычесть 1 балл у пользователя.\n"
+                            "💡 (В чате журналистов баллы идут журналистам, в остальных - информаторам)\n\n"
+                            "СБРОС И ОБНУЛЕНИЕ БАЛЛОВ:\n"
+                            "/list_stop - досрочно закрыть информаторов.\n"
+                            "/listj_stop - досрочно закрыть журналистов.\n\n"
+                            "ПЕРЕПИСЬ (/place):\n"
+                            "/place [Айди] [Фракция] [скриншот] - запись в базу пребытий.\n"
+                            "/check_place - полный список отписавшихся.\n\n"
+                            "ТЕСТЫ И СВЯЗЬ:\n"
+                            "/id - узнать ID текущей беседы.\n"
+                            "/test - выслать тестовый дайджест новостей."
+                        )
+                        send(vk, peer_id, help_msg)
+                        
+                    # --- Просмотр списка отметившихся /check_place ---
+                    elif text == '/check_place':
+                        place_msg = build_place_list_text(vk)
+                        send(vk, peer_id, place_msg)
+
+                    # --- Команда сезонной отметки /place ---
+                    elif text.startswith('/place'):
+                        parts = raw_text.split(maxsplit=2)
+                        if len(parts) < 3:
+                            send(vk, peer_id, "⚠️ Ошибка! Заполните команду строго по шаблону:\n/place Айди Фракция\n(и скриншот страницы «Мой кот/Моя кошка»)")
+                            continue
+                        
+                        user_custom_id = parts[1].strip()
+                        user_fraction = parts[2].strip()
+                        user_name = get_user_name(vk, user_id)
+                        
+                        place_data = load_place_db()
+                        place_data[str(user_id)] = {
+                            "name": user_name,
+                            "custom_id": user_custom_id,
+                            "fraction": user_fraction,
+                            "time": datetime.now().strftime('%d.%m.%Y %H:%M')
+                        }
+                        save_place_db(place_data)
+                        
+                        send(vk, peer_id, f"✅ Отметка принята! [id{user_id}|{user_name}] внесен в список.")
+                        
+                        log_entry = f"📦 Пользователь [id{user_id}|{user_name}] оставил отметку:\nID: {user_custom_id}\nФракция: {user_fraction}\nВремя: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+                        send(vk, CHAT_LOG_MONTHLY, log_entry)
 
                     # --- Команды изменения баллов вручную ---
                     elif text.startswith('/plus1') or text.startswith('/minus1'):
@@ -316,7 +518,7 @@ def start():
                         action_text = "начислен +1 балл" if is_plus else "вычтен 1 балл"
                         send(vk, peer_id, f"⭐ Пользователю [id{target_id}|{t_name}] ({role_title}) {action_text}. Всего баллов: {new_score}")
 
-                    # --- Просмотр списков ---
+                    # --- Просмотр полных списков ---
                     elif text == '/list':
                         list_msg = build_list_text(vk, "informers", "информаторов")
                         send(vk, peer_id, list_msg)
@@ -324,6 +526,15 @@ def start():
                     elif text == '/listj':
                         list_msg = build_list_text(vk, "journalists", "журналистов")
                         send(vk, peer_id, list_msg)
+
+                    # --- Просмотр индивидуальной статистики ---
+                    elif text == '/indlist':
+                        ind_msg = build_individual_score_text(vk, "informers", "информатора", user_id)
+                        send(vk, peer_id, ind_msg)
+
+                    elif text == '/indlistj':
+                        ind_msg = build_individual_score_text(vk, "journalists", "журналиста", user_id)
+                        send(vk, peer_id, ind_msg)
 
                     # --- Раздельный досрочный сброс листов ---
                     elif text == '/list_stop':
@@ -348,6 +559,7 @@ def start():
                         
                         send(vk, peer_id, "✅ Ваша новость отправлена журналистам!")
 
+                # --- Обработка кликов по инлайн-кнопкам (Callback-события) ---
                 elif event.type == VkBotEventType.MESSAGE_EVENT:
                     payload = event.obj.get('payload')
                     target_user = payload.get('uid')
@@ -388,6 +600,7 @@ def start():
                     except Exception as e:
                         log(f"Ошибка редактирования: {e}")
 
+                # --- Парсинг новых постов группы на стене ---
                 elif event.type == VkBotEventType.WALL_POST_NEW:
                     p = event.obj.get('wallpost') or event.obj
                     p_text = p.get('text', '')
